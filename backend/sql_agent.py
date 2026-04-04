@@ -42,6 +42,27 @@ STATE_FIPS_TO_NAME = {
     "53": "Washington", "54": "West Virginia", "55": "Wisconsin", "56": "Wyoming",
 }
 STATE_NAME_TO_FIPS = {v.lower(): k for k, v in STATE_FIPS_TO_NAME.items()}
+# 🔥 HANDLE FOLLOW-UP QUESTIONS
+from backend.memory_service import get_chat_history
+
+def enrich_with_context(query: str, session_id: str):
+    history = get_chat_history(session_id)
+
+    if not history:
+        return query
+
+    last_user_message = None
+    for msg in reversed(history):
+        if msg["role"] == "user":
+            last_user_message = msg["content"]
+            break
+
+    # Detect short follow-ups like "and for 2019?"
+    if len(query.split()) <= 5:
+        if last_user_message:
+            return f"{last_user_message} {query}"
+
+    return query
 
 
 def _quote_ident(name: str) -> str:
@@ -1104,6 +1125,8 @@ def _llm_fallback(query: str) -> Dict[str, Any]:
 
 
 def ask_question(user_query: str) -> Dict[str, Any]:
+    query = enrich_with_context(query, session_id)
+    
     unavailable_years = _unavailable_years_in_query(user_query)
     if unavailable_years:
         years_text = ", ".join(str(y) for y in unavailable_years)
