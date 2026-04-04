@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import time
-import threading
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -43,10 +42,6 @@ def _background_warm_schema() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # IMPORTANT:
-    # Do NOT block startup waiting for schema warmup.
-    # Start server first, warm cache in background.
-    
     yield
 
 
@@ -155,37 +150,64 @@ def _truncate_rows_for_metadata(result: Any, max_rows: int = MAX_RESULT_ROWS_IN_
     return result[:max_rows]
 
 
-def _recent_user_messages(session_id: str, limit: int = 3) -> List[str]:
-    messages = get_session_messages(session_id)
-    user_msgs = [m.get("content", "") for m in messages if m.get("role") == "user"]
-    return user_msgs[-limit:]
+def _is_small_talk(message: str) -> bool:
+    text = message.lower().strip()
+    return text in {
+        "hi", "hello", "hey", "ok", "okay", "thanks", "thank you", "cool", "great"
+    }
 
-
-import re
 
 def _is_follow_up(current_message: str) -> bool:
     lower = current_message.lower().strip()
 
-    triggers = [
-        "what about",
-        "how about",
-        "same for",
-        "same in",
-        "same with",
-        "same question",
-        "and for",
-        "and what about",
-        "compare that",
-        "compare this",
-        "that one",
-        "this one",
-        "those",
-        "them",
-        "it",
-        "instead",
+    if _is_small_talk(lower):
+        return False
+
+    followup_patterns = [
+        r"^what about\b",
+        r"^how about\b",
+        r"^same for\b",
+        r"^same in\b",
+        r"^same with\b",
+        r"^same question\b",
+        r"^and for\b",
+        r"^and what about\b",
+        r"^and of\b",
+        r"^and in\b",
+        r"^for 20\d{2}\??$",
+        r"^in 20\d{2}\??$",
+        r"^of 20\d{2}\??$",
+        r"^and for 20\d{2}\??$",
+        r"^and in 20\d{2}\??$",
+        r"^and of 20\d{2}\??$",
+        r"^top \d+\b.*instead$",
+        r"^top \d+\b",
+        r"^bottom \d+\b",
+        r"^and what about counties\b",
+        r"^and what about county\b",
+        r"^and what about states\b",
+        r"^counties\??$",
+        r"^county\??$",
+        r"^states\??$",
+        r"^state\??$",
+        r"^instead$",
+        r"^that one$",
+        r"^this one$",
+        r"^them$",
+        r"^it$",
     ]
 
-    return any(trigger in lower for trigger in triggers)
+    return any(re.search(pattern, lower) for pattern in followup_patterns)
+
+
+def _recent_user_messages(session_id: str, limit: int = 8) -> List[str]:
+    session = get_session(session_id)
+    if not session:
+        return []
+
+    messages = session.get("messages", [])
+    user_messages = [m["content"] for m in messages if m.get("role") == "user"]
+    return user_messages[-limit:]
 
 
 def _resolve_anchor_question(session_id: str) -> str:
@@ -193,22 +215,23 @@ def _resolve_anchor_question(session_id: str) -> str:
     if not recent:
         return ""
 
-    # Walk backwards to find the most recent NON-follow-up user query.
     for msg in reversed(recent):
         if not _is_follow_up(msg):
             return msg.strip()
 
-    # If everything is follow-up, fall back to oldest available.
     return recent[0].strip()
 
 
 def _build_effective_question(session_id: str, current_message: str) -> str:
     current = current_message.strip()
 
+    if _is_small_talk(current):
+        return current
+
     if not _is_follow_up(current):
         return current
 
-    recent = _recent_user_messages(session_id=session_id, limit=6)
+    recent = _recent_user_messages(session_id=session_id, limit=8)
     previous_user_question = recent[-1].strip() if recent else ""
     anchor_question = _resolve_anchor_question(session_id=session_id)
 
@@ -216,12 +239,15 @@ def _build_effective_question(session_id: str, current_message: str) -> str:
         f"Anchor question: {anchor_question}\n"
         f"Previous user question: {previous_user_question}\n"
         f"Follow-up user question: {current}\n"
-        f"Instruction: Preserve the original metric/topic from the anchor question unless the follow-up clearly changes the metric. "
-        f"Apply modifications from the latest follow-up, such as geography, ranking, year, or comparison. "
-        f"If the follow-up says things like 'same for Texas', 'what about counties', or 'top 5 states instead', keep the same metric and only change the requested filter/grouping."
+        f"Instruction: Rewrite the follow-up into a complete standalone census question. "
+        f"Preserve the original metric/topic from the anchor question unless the follow-up clearly changes the metric. "
+        f"Apply modifications from the latest follow-up, such as geography, year, ranking, or comparison. "
+        f"For example:\n"
+        f"- 'and of 2019?' means keep the same metric and switch only the year to 2019.\n"
+        f"- 'and in 2020?' means keep the same metric and switch only the year to 2020.\n"
+        f"- 'same for Texas' means keep the same metric and switch geography to Texas.\n"
+        f"- 'and what about counties?' means keep the same metric and switch grouping to counties."
     )
-
-
 
 
 def _build_assistant_metadata(
@@ -332,6 +358,42 @@ def chat(payload: ChatRequest):
         content=user_message,
         metadata={},
     )
+
+    if _is_small_talk(user_message):
+        total_ms = int((time.perf_counter() - started) * 1000)
+        answer = "I can help with US census questions like population, income, rent, state rankings, and 2019 vs 2020 comparisons."
+
+        assistant_metadata = _build_assistant_metadata(
+            status="small_talk",
+            sql=None,
+            row_count=0,
+            error=None,
+            selected_tables=[],
+            chart_hint="table",
+            total_ms=total_ms,
+            result=[],
+        )
+
+        append_message(
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            metadata=assistant_metadata,
+        )
+
+        return ChatResponse(
+            status="small_talk",
+            session_id=session_id,
+            question=user_message,
+            answer=answer,
+            sql=None,
+            result=[],
+            row_count=0,
+            error=None,
+            selected_tables=[],
+            chart_hint="table",
+            total_ms=total_ms,
+        )
 
     effective_question = _build_effective_question(
         session_id=session_id,
