@@ -5,7 +5,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
-
+from backend.llm import call_llm
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -220,6 +220,19 @@ def _resolve_anchor_question(session_id: str) -> str:
             return msg.strip()
 
     return recent[0].strip()
+from backend.llm import call_llm
+
+
+def _rewrite_followup_with_llm(prompt: str) -> str:
+    try:
+        response = call_llm(
+            system_prompt="You convert follow-up questions into complete standalone census questions.",
+            user_prompt=prompt,
+            temperature=0,
+        )
+        return response.strip()
+    except Exception:
+        return prompt
 
 
 def _build_effective_question(session_id: str, current_message: str) -> str:
@@ -235,19 +248,23 @@ def _build_effective_question(session_id: str, current_message: str) -> str:
     previous_user_question = recent[-1].strip() if recent else ""
     anchor_question = _resolve_anchor_question(session_id=session_id)
 
-    return (
+    prompt = (
         f"Anchor question: {anchor_question}\n"
         f"Previous user question: {previous_user_question}\n"
-        f"Follow-up user question: {current}\n"
-        f"Instruction: Rewrite the follow-up into a complete standalone census question. "
-        f"Preserve the original metric/topic from the anchor question unless the follow-up clearly changes the metric. "
-        f"Apply modifications from the latest follow-up, such as geography, year, ranking, or comparison. "
-        f"For example:\n"
-        f"- 'and of 2019?' means keep the same metric and switch only the year to 2019.\n"
-        f"- 'and in 2020?' means keep the same metric and switch only the year to 2020.\n"
-        f"- 'same for Texas' means keep the same metric and switch geography to Texas.\n"
-        f"- 'and what about counties?' means keep the same metric and switch grouping to counties."
+        f"Follow-up user question: {current}\n\n"
+        f"Rewrite into ONE clear standalone census question.\n"
+        f"Rules:\n"
+        f"- Keep same metric\n"
+        f"- Apply year change if mentioned\n"
+        f"- Apply geography change if mentioned\n"
+        f"- Return ONLY final question\n\n"
+        f"Example:\n"
+        f"Q: Show me rent\n"
+        f"Follow-up: and of 2019\n"
+        f"A: What is the rent in 2019?"
     )
+
+    return _rewrite_followup_with_llm(prompt)
 
 
 def _build_assistant_metadata(
