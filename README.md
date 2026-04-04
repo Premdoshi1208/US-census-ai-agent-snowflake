@@ -108,7 +108,7 @@ Top 5 counties by population
 Compare population between 2019 and 2020
 What is the population in California?
 Same for Texas
-And in 2020?
+
 🚫 Out-of-Scope Handling
 
 The system correctly rejects unrelated queries.
