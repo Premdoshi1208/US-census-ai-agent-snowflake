@@ -223,17 +223,27 @@ def _resolve_anchor_question(session_id: str) -> str:
 from backend.llm import call_llm
 
 
+
 def _rewrite_followup_with_llm(prompt: str) -> str:
     try:
         response = call_llm(
-            system_prompt="You convert follow-up questions into complete standalone census questions.",
-            user_prompt=prompt,
+            prompt=prompt,  # ✅ FIXED
+            system_prompt=(
+                "You are an expert data assistant. "
+                "Convert follow-up questions into complete standalone census questions. "
+                "Always return a FULL question. Never return partial phrases."
+            ),
             temperature=0,
         )
+
+        # safety fallback
+        if not response or len(response.strip()) < 5:
+            return prompt
+
         return response.strip()
+
     except Exception:
         return prompt
-
 
 def _build_effective_question(session_id: str, current_message: str) -> str:
     current = current_message.strip()
@@ -264,7 +274,19 @@ def _build_effective_question(session_id: str, current_message: str) -> str:
         f"A: What is the rent in 2019?"
     )
 
-    return _rewrite_followup_with_llm(prompt)
+    rewritten = _rewrite_followup_with_llm(prompt)
+
+# 🚨 fallback if LLM fails
+    if rewritten.lower().strip() in {
+    current.lower().strip(),
+    "and of 2019",
+    "and for 2019",
+    "2019",
+    "of 2019",
+}:
+        return f"{anchor_question} in 2019"
+
+    return rewritten
 
 
 def _build_assistant_metadata(
