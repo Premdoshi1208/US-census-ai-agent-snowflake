@@ -5,7 +5,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
-from backend.llm import call_llm
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -224,29 +224,10 @@ from backend.llm import call_llm
 
 
 
-def _rewrite_followup_with_llm(prompt: str) -> str:
-    try:
-        response = call_llm(
-            prompt=prompt,  # ✅ FIXED
-            system_prompt=(
-                "You are an expert data assistant. "
-                "Convert follow-up questions into complete standalone census questions. "
-                "Always return a FULL question. Never return partial phrases."
-            ),
-            temperature=0,
-        )
 
-        # safety fallback
-        if not response or len(response.strip()) < 5:
-            return prompt
-
-        return response.strip()
-
-    except Exception:
-        return prompt
 
 def _build_effective_question(session_id: str, current_message: str) -> str:
-    current = current_message.strip()
+    current = current_message.lower().strip()
 
     if _is_small_talk(current):
         return current
@@ -254,39 +235,34 @@ def _build_effective_question(session_id: str, current_message: str) -> str:
     if not _is_follow_up(current):
         return current
 
-    recent = _recent_user_messages(session_id=session_id, limit=8)
-    previous_user_question = recent[-1].strip() if recent else ""
-    anchor_question = _resolve_anchor_question(session_id=session_id)
+    anchor = _resolve_anchor_question(session_id)
 
-    prompt = (
-        f"Anchor question: {anchor_question}\n"
-        f"Previous user question: {previous_user_question}\n"
-        f"Follow-up user question: {current}\n\n"
-        f"Rewrite into ONE clear standalone census question.\n"
-        f"Rules:\n"
-        f"- Keep same metric\n"
-        f"- Apply year change if mentioned\n"
-        f"- Apply geography change if mentioned\n"
-        f"- Return ONLY final question\n\n"
-        f"Example:\n"
-        f"Q: Show me rent\n"
-        f"Follow-up: and of 2019\n"
-        f"A: What is the rent in 2019?"
-    )
+    # 🔥 Handle year-based follow-ups
+    year_match = re.search(r"(20\d{2})", current)
+    if year_match:
+        year = year_match.group(1)
+        return f"{anchor} in {year}"
 
-    rewritten = _rewrite_followup_with_llm(prompt)
+    # 🔥 Handle "same for Texas" / "what about California"
+    if "same for" in current or "what about" in current:
+        location = current.replace("same for", "").replace("what about", "").strip()
+        return f"{anchor} in {location}"
 
-# 🚨 fallback if LLM fails
-    if rewritten.lower().strip() in {
-    current.lower().strip(),
-    "and of 2019",
-    "and for 2019",
-    "2019",
-    "of 2019",
-}:
-        return f"{anchor_question} in 2019"
+    # 🔥 Handle counties / states
+    if "county" in current:
+        return f"{anchor} by county"
 
-    return rewritten
+    if "state" in current:
+        return f"{anchor} by state"
+
+    # 🔥 Handle ranking
+    top_match = re.search(r"top (\d+)", current)
+    if top_match:
+        k = top_match.group(1)
+        return f"top {k} {anchor}"
+
+    # fallback
+    return anchor
 
 
 def _build_assistant_metadata(
@@ -438,6 +414,8 @@ def chat(payload: ChatRequest):
         session_id=session_id,
         current_message=user_message,
     )
+    print("DEBUG ORIGINAL:", user_message)
+    print("DEBUG EFFECTIVE:", effective_question)
 
     try:
         agent_response = ask_question(effective_question)
