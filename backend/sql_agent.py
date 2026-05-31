@@ -561,80 +561,18 @@ def _answer_total_metric(query: str) -> Optional[Dict[str, Any]]:
     )
 
 
-def _answer_compare_years(query: str) -> Optional[Dict[str, Any]]:
-    years = _years_in_query(query)
-    if len(years) < 2:
-        return None
-
-    year_a, year_b = years[0], years[1]
-    cand_a = _resolve_metric_candidate(query, year=year_a)
-    cand_b = _resolve_metric_candidate(query, year=year_b)
-
-    if cand_a is None or cand_b is None:
-        return {
-            "status": "unanswerable",
-            "question": query,
-            "answer": f"I could not resolve the requested metric for both {year_a} and {year_b} from the available tables.",
-            "sql": None,
-            "result": [],
-            "row_count": 0,
-            "error": None,
-            "selected_tables": [x for x in [cand_a["table_name"] if cand_a else None, cand_b["table_name"] if cand_b else None] if x],
-            "chart_hint": "bar",
-        }
-
-    metric_name = _friendly_metric_name(query, cand_a)
-    alias_a = f"{_sql_alias_from_name(metric_name)}_{year_a}"
-    alias_b = f"{_sql_alias_from_name(metric_name)}_{year_b}"
-    state_filter = _extract_state_filter_code(query)
-    where_a = _state_filter_where_clause(state_filter)
-    where_b = _state_filter_where_clause(state_filter)
-
-    agg_a = "MEDIAN" if _query_metric_family(query) in {"income", "rent"} else "SUM"
-    agg_b = "MEDIAN" if _query_metric_family(query) in {"income", "rent"} else "SUM"
-
-    extra = f', (b.{_quote_ident(alias_b)} - a.{_quote_ident(alias_a)}) AS "ABSOLUTE_CHANGE"'
-    if _is_growth_query(query):
-        extra += (
-            f', CASE WHEN a.{_quote_ident(alias_a)} = 0 THEN NULL '
-            f'ELSE ((b.{_quote_ident(alias_b)} - a.{_quote_ident(alias_a)}) / a.{_quote_ident(alias_a)}) * 100 END AS "PERCENT_CHANGE"'
-        )
-
-    sql = (
-        f"SELECT a.{_quote_ident(alias_a)}, b.{_quote_ident(alias_b)}{extra} "
-        f"FROM (SELECT {agg_a}({_quote_ident(cand_a['column_name'])}) AS {_quote_ident(alias_a)} FROM {_quote_ident(cand_a['table_name'])} {where_a}) a "
-        f"CROSS JOIN (SELECT {agg_b}({_quote_ident(cand_b['column_name'])}) AS {_quote_ident(alias_b)} FROM {_quote_ident(cand_b['table_name'])} {where_b}) b"
-    )
-
-    def _builder(rows: List[Dict[str, Any]]) -> str:
-        if not rows:
-            return "The comparison query returned no rows."
-        row = rows[0]
-        av = row.get(alias_a) or row.get(alias_a.upper())
-        bv = row.get(alias_b) or row.get(alias_b.upper())
-        delta = row.get("ABSOLUTE_CHANGE")
-        scope = f" in {STATE_FIPS_TO_NAME.get(state_filter, state_filter)}" if state_filter else ""
-
-        if _is_growth_query(query):
-            pct = row.get("PERCENT_CHANGE")
-            return (
-                f"The {metric_name}{scope} in {year_a} is {_format_value(av)}, "
-                f"in {year_b} is {_format_value(bv)}, for an absolute change of {_format_value(delta)} "
-                f"and a percent change of {_format_value(pct)}."
-            )
-
-        return (
-            f"The {metric_name}{scope} in {year_a} is {_format_value(av)} and in {year_b} is {_format_value(bv)}, "
-            f"for an absolute change of {_format_value(delta)}."
-        )
-
-    return _run_sql_answer(
-        question=query,
-        sql=sql,
-        answer_builder=_builder,
-        selected_tables=[cand_a["table_name"], cand_b["table_name"]],
-        chart_hint="bar",
-    )
+if len(years) < 2:
+    return {
+        "status": "unanswerable",
+        "question": query,
+        "answer": f"I could not find at least two years to compare in the query: {query}",
+        "sql": None,
+        "result": [],
+        "row_count": 0,
+        "error": None,
+        "selected_tables": [],
+        "chart_hint": "bar"
+    }
 
 
 def _answer_ranked(query: str) -> Optional[Dict[str, Any]]:
